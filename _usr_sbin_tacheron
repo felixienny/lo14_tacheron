@@ -1,0 +1,192 @@
+#!/bin/bash
+
+# Création du fichier tacheron.allow si inexistant, pour ajouter des utilisateurs
+if [ ! -f /etc/tacheron.allow ]
+then
+    touch /etc/tacheron.allow
+    if [ $? -eq 0 ]
+    then
+        echo "Fichier tacheron.allow créé"
+        echo "root" > /etc/tacheron.allow
+    else
+        echo "Echec de création du fichier tacheron.allow : Permission non accordée"
+        exit
+    fi
+fi
+ 
+# Création du fichier tacheron.deny si inexistant, pour banir des utilisateurs
+if [ ! -f /etc/tacheron.deny ]
+then
+    touch /etc/tacheron.deny
+    if [ $? -eq 0 ]
+    then
+        echo "Fichier tacheron.deny créé"
+    else
+        echo "Echec de création du fichier tacheron.deny : Permission non accordée"
+        exit
+    fi
+fi
+ 
+# Création du répertoire /etc/tacheron/ si inexistant, pour les fichiers de commandes de chaque utilisateur du service
+if [ ! -d /etc/tacheron ]
+then
+    mkdir /etc/tacheron
+    if [ $? -eq 0 ]
+    then
+        echo "Repertoire /etc/tacheron créé"
+    else
+        echo "Echec de création du repertoire /etc/tacheron : Permission non accordée"
+        exit
+    fi
+fi
+
+# Création du fichier /var/log/tacheron si inexistant, pour les logs du service
+if [ ! -f /var/log/tacheron ]
+then
+    touch /var/log/tacheron
+fi
+
+
+
+# On s'assure que le répertoire /etc/tacheron/ qui contient les fichiers tacherontab est accessible en lecture
+chmod +r -R /etc/tacheron
+
+# On crée le fichier tacherontmp qui va stocker temporairement les commandes à exécuter à l'instant donné s'il y en a
+if [ -f /tmp/tacherontmp ]
+then
+    touch /tmp/tacherontmp
+    chmod +rw /tmp/tacherontmp
+fi
+
+
+# On mets en attente le script jusqu'à la prochaine minute pile
+sleep $(expr 60 - $(date +"%S") % 60)
+
+
+# Boucle sans fin du service, qui s'exécute périodiquement tous les quarts de minutes (0, 15, 30 et 45 secondes)
+while [ 1 ]
+do
+    # Récuperation dans un tableau à six champs des secondes(0-3), des minutes(0-59), des heures(0-23), du jour du mois(1-31), du mois(1-12) et du jour de la semaine(0-6)
+    current_datetime=($(expr $(date +"%S") / 15) $(date +"%M") $(date +"%H") $(date +"%d") $(date +"%m") $(date +"%w"))
+ 
+    # Boucle sur les fichiers tacherontab présents dans le répertoire /etc/tacheron/
+    for file in $(ls /etc/tacheron/* | grep tacherontab)
+    do
+        # Récuperation à partir du nom du fichier de l'utilisateur concerné
+        user=$(echo $file | sed 's/^\/etc\/tacheron\/tacherontab//')
+
+        # On traite le fichier seulement s'il est accessible en lecture, que l'utilisateur se trouve dans les utilisateurs acceptés du service et qu'il n'est pas dans ceux bannis
+        if [ -r $file ] && [ $(cat /etc/passwd | egrep "^$user" -c) -ne 0 ] && [ $(cat /etc/tacheron.allow | grep -c $user) -ne 0 ] && [ $(cat /etc/tacheron.deny | grep -c $user) -eq 0 ]
+        then
+            # Boucle qui prend en entrée le fichier tacherontab d'un utilisateur
+            # A la lecture de chaque ligne on sépare les sept champs
+            while read sec min heu jmo moi jse cmd
+            do
+                # Si le premier champ est vide cela veut dire que toute la ligne l'est on passe donc à la suivante
+                # Sinon on traite la ligne
+                if [ -z "$sec" ]
+                then
+                    continue
+                else
+                    # Booleen nous indiquant si les champs temporels sont validés et si la comande doit être exécutée
+                    ligne_ok=0
+                    # Entier permettant de suivre l'élement de la date courante à observer
+                    j=0
+
+                    # Boucle qui va valider ou non la valeur de chacun des six champs temporels
+                    for champ in "$sec" "$min" "$heu" "$jmo" "$moi" "$jse"
+                    do
+                        # Toutes les valeurs possibles, c'est à dire la première valeur du champ et toutes celles précédées par des virgules(,) et pas par des tildas(~)
+                        valposs=$(echo "${champ//","/ }" | sed 's/~[[:digit:]]\+//gm')
+                        # Toutes les valeurs impossibles, c'est à dire celles précédées par des tildas(~) et non pas par des virgules(,)
+                        valimposs=$(echo "${champ//"~"/ }" | cut -d' ' -f2- | sed 's/,[[:digit:]]\+//gm')
+
+
+                        # Examination de toutes les valeurs possibles
+                        for val in "$valposs"
+                        do
+                            # Booleen nous disant si la variable temporelle acctuelle (seconde, minute, heure, etc...) rentre dans le critère du champ temporel
+                            champ_ok=0
+
+                            # Si la valeur possible est une étoile ou est égale à la variable temporelle actuelle, alors le champ est validé
+                            if [[ "$val" == "*" ]] || [ "$val" == "${current_datetime[j]}" ]
+                            then
+                                champ_ok=1
+
+                            # Si la valeur possible est un intervalle (-) et que la variable temporelle actuelle est contenu dedans, alors le champ est validé
+                            elif [ $(echo "$val" | grep -c "-") -ne 0 ]
+                            then
+                                min=$(echo $val | sed 's/-\w*$//')
+                                max=$(echo $val | sed 's/^\w*-//')
+                                if [ ${current_datetime[j]} -ge $min ] && [ ${current_datetime[j]} -le $max ]
+                                then
+                                    champ_ok=1
+                                fi
+
+                            # Si la valeur est une périodicité (*/) et que le reste de la division de la variable temporelle actuelle par la période est nul, alors le champ est validé
+                            elif [ $(echo "$val" | grep -c "*/") -ne 0 ]
+                            then
+                                if [[ $(expr ${current_datetime[j]} % $(echo $val | sed 's/\*\///')) -eq 0 ]]
+                                then
+                                    champ_ok=1
+                                fi
+                            fi
+
+                        done
+
+                        # Si le champ contient des valeurs impossibles et qu'une des valeurs impossibles correspond à la variable temporelle actuelle, alors le champ n'est plus valide
+                        if [ $(echo "$champ" | grep -c "~") -ne 0 ] && [ $(echo " $valimposs " | grep -c " ${current_datetime[j]} ") -ne 0 ]
+                        then
+                            champ_ok=0
+                        fi
+
+
+                        # Si le champ est validé alors la ligne l'est aussi jusqu'à l'examintation du prochain champ
+                        # Sinon la ligne ne peut pas être validée avec un champ faux, alors on mets la ligne à faux et on sort de la boucle d'examination des champs
+                        if [ $champ_ok -eq 1 ]
+                        then
+                            ligne_ok=1 
+                            j=$(expr $j + 1)
+                        else
+                            ligne_ok=0
+                            break
+                        fi
+                    done
+
+                    # Si la ligne est validée, alors on l'ajoute au commandes à exécuter
+                    if [ $ligne_ok -eq 1 ]
+                    then
+                        echo "$file $cmd" >> "/tmp/tacherontmp"
+                    fi
+                fi
+            done < $file
+        fi
+    done
+
+    # Boucle qui prend en entrée le contenu du fichier temporaire contenant les commandes à exécuter
+    while read file cmd
+    do
+        # Si la ligne contient bien deux champs non nuls, alors on la traite
+        if [[ ! -z $file && ! -z $cmd ]]
+        then
+            # On récupère le nom d'utilisateur à partir du fichier
+            user=$(echo $file | sed 's/^\/etc\/tacheron\/tacherontab//')
+            # On exécute la commande $cmd en tant que l'utilisateur $user
+            sudo -u $user $cmd
+            # Si la commande a réussie, on écrit dans le log qu'elle a réussi et n'a pas posé de problèmes
+            # Sinon on écrit dans le log qu'elle a échoué
+            if [ $? -eq 0 ]
+            then
+                echo $user a réussi la commande : $cmd
+                echo "$file : $cmd réussie le $(date)" >> /var/log/tacheron
+            else
+                echo "$file : $cmd échouée le $(date)" >> /var/log/tacheron
+            fi
+        fi
+    done < /tmp/tacherontmp
+ 
+    echo "" > /tmp/tacherontmp
+
+    # On mets en attente le script jusqu'au prochain quart de minute
+    sleep $(expr 15 - $(date +"%S") % 15)
+done 

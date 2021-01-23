@@ -1,0 +1,80 @@
+#!/bin/bash
+
+# On récupère le nom de l'utilisateur qui exécute la commande
+user=$(whoami)
+
+# Si la commande a recu un argument {-l | -r | -e} ou bien trois arguments (-u user {-l | -r | -e}), alors on traite
+# Sinon on rappelle l'usage de la commande
+if ([ $# -eq 1 ] && ([ $1 == "-e" ] || [ $1 == "-l" ] || [ $1 == "-r" ])) || ([ $# -eq 3 ] && [ $1 == "-u" ] && ([ $3 == "-e" ] || [ $3 == "-l" ] || [ $3 == "-r" ]))
+then
+	# Si l'utilisateur n'est pas root et qu'il est présent dans le fichier /etc/tacheron.deny ou absent du ficchier /etc/tacheron/tacheron.allow, alors on lui refuse l'accès à cette commande puisqu'il ne peut pas utiliser le service
+	if  [ $user != "root" ] && ([ $(cat /etc/tacheron.deny | grep -c $user) -ne 0 ] || [ $(cat /etc/tacheron.allow | grep -c $user) -eq 0 ])
+	then
+		echo "$user ne peut pas utiliser la commande tacherontab, il est possible qu'il soit présent dans tacheron.deny ou bien absent dans tacheron.allow"
+		exit
+	fi
+
+	# Si le nombre d'arguments est un, alors l'action à executée est dans le premier argument et on considère que l'utilisateur exécute la commande pour lui-même
+	# Sinon c'est trois arguments qui sont transmis dont le nom de l'utilisateur visé et l'action à éxécuter
+	if [ $# -eq 1 ]
+	then
+		targetuser=$user
+		action=$1
+	else
+		# Si l'utilisateur est le super utilisateur ou qu'il est présent dans le fichier /etc/tacheron.allow, alors la permission lui ai accordé
+		targetuser=$2
+		action=$3
+		# Si l'utilisateur n'est pas root et que la cible de la commande est différente de l'utilisateur qui l'exécute alors la permission est refusée
+		if [ $user != "root" ] && [ $targetuser != $user ]
+		then
+			echo "Permission non-accordée: $user ne peut pas utiliser tacherontab pour $targetuser"
+			exit
+		fi
+	fi
+
+	# On traite les différentes valeurs que peut prendre $action, l'action à réaliser
+	case $action in
+	# Si l'action est -l on vérifie que /etc/tacheron/tacherontab$targetuser existe et est accessible en lecture et si c'est le cas on en affiche le contenu sur la sortie standard
+	-l)	if [ -r /etc/tacheron/tacherontab$targetuser ]
+		then
+			echo "Voici le contenu du fichier tacherontab$targetuser: "
+			cat /etc/tacheron/tacherontab$targetuser
+		else
+			echo "Le fichier /etc/tacheron/tacherontab$targetuser n'existe pas"
+		fi
+		;;
+	# Si l'action est -r, on vérifie que le fichier /etc/tacheron/tacherontab$targetuser existe et si c'est le cas on le supprime
+	-r)	if [ -f /etc/tacheron/tacherontab$targetuser ]
+		then
+			rm -f /etc/tacheron/tacherontab$targetuser
+			echo "Le fichier tacherontab$targetuser est supprimé"
+		else
+			"Le fichier /etc/tacheron/tacherontab$targetuser n'existe pas"
+		fi
+		;;
+	# Si l'action est -e, on vérifie que le fichier /etc/tacheron/tacherontab$user existe, si ce n'est pas le cas on le crée puis on ajoute le targetuser dans tacheron.allow
+	-e) if [ -f /etc/tacheron/tacherontab$targetuser ]
+		then
+			echo "Le fichier /etc/tacheron/tacherontab$targetuser existe déjà"
+		else
+			touch /etc/tacheron/tacherontab$targetuser
+			echo $targetuser >> /etc/tacheron.allow
+			if [ $? -eq 0 ]
+			then 
+				echo "Le fichier /etc/tacheron/tacherontab$targetuser est crée"
+			fi
+		fi
+		# Ensuite, on copie le fichier tacherontab$targetuser dans /tmp, on l'ouvre et une fois que les modifications sont terminées on le redéplace dans son répertoire d'origine.
+		cp /etc/tacheron/tacherontab$targetuser /tmp
+		vi /tmp/tacherontab$targetuser
+		if [ $? -eq 0 ]
+		then
+			mv /tmp/tacherontab$targetuser /etc/tacheron/tacherontab$targetuser
+			echo "Le fichier a été édité avec succès"
+		fi
+		;;
+	esac
+else
+	echo "Usage tacherontab [-u user] {-l | -r | -e}"
+	exit 0
+fi

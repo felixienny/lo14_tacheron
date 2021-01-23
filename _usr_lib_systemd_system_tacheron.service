@@ -1,0 +1,10 @@
+[Unit]
+Description=Service de programmation de commandes
+
+[Service]
+Type=simple
+User=root
+ExecStart=/bin/bash /usr/sbin/tacheron
+
+[Install]
+WantedBy=multi-user.target
